@@ -1,107 +1,54 @@
 # plato-forge-bridge
 
-Bridges the **ForgeFlux tile decomposition pipeline** with **Plato agent rooms**.
+The bridge between **ForgeFlux** tile pipelines and **Plato** agent rooms.
 
-## The Bridge Concept
+## What It Does
 
-ForgeFlux decomposes knowledge into Tiles. Plato agents communicate through Ticks. These are the same unit of work at different levels of abstraction — the bridge makes that explicit.
+ForgeFlux decomposers break work into **tiles** — structured chunks of data carrying a room, kind, payload, and conservation ratio (CR). Plato agents operate on **ticks** — discrete content units annotated with room, agent identity, and type.
 
-```
-  [Tile]                         [ForgeRoom]
-    │                                 ▲
-    │  TileToTickMapper               │ assembled tiles
-    ▼                                 │
-  [ForgeTick] ──► agent A ──► agent B ──► ForgeBridge.assemble()
-                  transform   transform
-```
+`plato-forge-bridge` is the translation layer between these two worlds:
 
-**Mapping strategy: 1:1.** One tile serializes to one tick. One tick deserializes to one tile. There is no fragmentation — agents receive the full tile context and return a mutated version. This keeps reassembly trivial and provenance tracking clean.
+- **Tile → Tick**: Tiles from forge pipelines are mapped to agent-readable ticks via `TileToTickMapper`. Agents consume ticks in their rooms.
+- **Tick → Tile**: Agent responses are converted back into tiles via `TickToTileMapper` and re-enqueued for pipeline reassembly.
+- **Conservation Ratio (CR)**: Each tile carries a CR value tracking fidelity through transformations. The bridge aggregates room-level and pipeline-level CR so you can monitor information quality end-to-end.
 
 ## Core Types
 
 | Type | Role |
 |---|---|
-| `Tile` | A Plato knowledge unit: `{domain, question, answer, confidence, tags, provenance}` |
-| `ForgeTick` | A tile in transit: carries the tile payload + pipeline metadata + agent path |
-| `ForgeTickKind` | `Ingest → Transform → Verified → Assembled` (or `Rejected`) |
-| `TileToTickMapper` | Serializes tiles into ticks, assigns seq numbers |
-| `TickToTileMapper` | Deserializes ticks back to tiles, accumulates provenance |
-| `ForgeBridge` | Owns the tick buffer, manages the agent transform pipeline, routes to rooms |
-| `ForgeRoom` | Output sink — a named Plato room that receives assembled tiles by domain |
+| `ForgeBridge` | Manages rooms, queues tiles, dispatches ticks |
+| `ForgeRoom` | Tracks agent count, tile throughput, CR per room |
+| `BridgeTile` | A tile flowing from forge → bridge |
+| `AgentTick` | A tick consumed/produced by Plato agents |
 
-## Usage
+## Quick Start
 
 ```rust
-use plato_forge_bridge::{ForgeBridge, BridgeConfig, ForgeRoom, Tile};
+use plato_forge_bridge::*;
+use uuid::Uuid;
 
-let mut bridge = ForgeBridge::new(BridgeConfig::default());
+let mut bridge = ForgeBridge::new(Uuid::new_v4());
+bridge.add_room("analysis");
 
-// Register output rooms by domain
-bridge.register_room(ForgeRoom::new("math").with_domain("math"));
+bridge.enqueue_tile(BridgeTile {
+    id: Uuid::new_v4(),
+    room: "analysis".into(),
+    tile_kind: "text".into(),
+    payload: b"hello".to_vec(),
+    text: Some("hello".into()),
+    cr: 0.98,
+    timestamp_ms: 1000,
+});
 
-// Ingest a tile
-let tile = Tile::new("math", "What is pi?", "3.14159…")
-    .with_confidence(0.95)
-    .with_tags(["geometry", "constants"]);
-
-let tick = bridge.ingest(&tile).unwrap().clone();
-
-// Agent transform (closure mutates the tile in-flight)
-let tick = bridge
-    .transform(&tick, "verifier-agent", |mut t| {
-        t.provenance.push("verified-2026".into());
-        t
-    })
-    .unwrap()
-    .clone();
-
-// Assemble: reconstructs tile and routes to matching rooms
-let output = bridge.assemble(&tick).unwrap();
-assert_eq!(bridge.rooms()[0].tile_count(), 1);
-```
-
-## Tick Lifecycle
-
-```
-Ingest → [Transform]* → Assembled   (happy path)
-Ingest → [Transform]* → Rejected    (dead-letter buffer)
-```
-
-- **Ingest**: raw tile enters the pipeline
-- **Transform**: an agent mutates the tile (answer refinement, confidence update, tag addition)
-- **Verified**: an agent marks the tile as validated (no mutation)
-- **Assembled**: terminal — tile is reconstructed and routed to ForgeRooms
-- **Rejected**: terminal — tile is moved to the dead-letter buffer with a reason
-
-## ForgeRoom Routing
-
-Rooms filter by domain. An unfiltered room accepts all tiles.
-
-```rust
-// Domain-specific room
-ForgeRoom::new("physics-room").with_domain("physics")
-
-// Catch-all room
-ForgeRoom::new("inbox")
-
-// Query the room
-room.tiles_with_tag("verified")
-room.tiles_above_confidence(0.8)
-room.drain()  // agent consumes all tiles
+let ticks = bridge.dequeue_ticks("analysis");
+let response = bridge.agent_response(ticks[0].clone());
 ```
 
 ## Dependencies
 
-`serde`, `serde_json`, `uuid`, `thiserror`. Zero network dependencies.
-
-## Tests
-
-```
-cargo test
-```
-
-20 tests covering: tile↔tick roundtrip, agent path recording, monotonic seq, bridge stats, room routing, domain filtering, dead-letter, provenance accumulation, field access.
+- `serde` + `serde_json` — serialization
+- `uuid` — unique IDs
 
 ## License
 
-Apache-2.0
+MIT
